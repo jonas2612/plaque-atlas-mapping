@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+import argparse
+from pathlib import Path
+import warnings
+import anndata as ad
 import scanpy as sc
 from scarches.models.scpoli import scPoli
 import anndata
@@ -9,19 +13,40 @@ import matplotlib.pyplot as plt
 from scipy.sparse import issparse
 import scipy.sparse as sparse
 from scarches.models.base._utils import _validate_var_names
+import torch
 import sys
 import logging
 import os
 
+logger = logging.getLogger("scRNAseq_pipeline")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
+logger.addHandler(handler)
+warnings.filterwarnings("ignore")
 ################## input arguments ##################
 
 def str_to_bool(value):
     return value.lower() in ('true', '1', 't', 'yes', 'y')
 
-adata_input_file = sys.argv[1]
-lognorm_bool = str_to_bool(sys.argv[2])
-cell_type_bool = str_to_bool(sys.argv[3])
-ensembl_bool = str_to_bool(sys.argv[4])
+parser = argparse.ArgumentParser(
+    description="Run cell type annotation based on the plaque atlas."
+)
+parser.add_argument("input_file", help="file to adata")
+parser.add_argument("output_dir", help="directory for output")
+parser.add_argument("output_dir_images", default=None, help="directory for output")
+parser.add_argument("sample_col", default="sample", help="adata.obs column with sample identifier.")
+parser.add_argument("--lognorm_bool", default=False, action="store_true", help="adata counts are log-normalized")
+parser.add_argument("--cell_type_bool", default=False, action="store_true", help="adata has a 'cell_type_level2' (or 'cell_type_level1') column filled with 'unknown'")
+parser.add_argument("--ensembl_bool", default=False, action="store_true", help=" varnames are ensemblIDs")
+args = parser.parse_args()
+adata_input_file = args.input_file
+output_dir = Path(args.output_dir)
+output_dir_images = output_dir if args.output_dir_images is None else Path(args.output_dir_images)
+sample_col = args.sample_col
+lognorm_bool = args.lognorm_bool
+cell_type_bool = args.cell_type_bool
+ensembl_bool = args.ensembl_bool
 #tissue_name_file = sys.argv[5]
 
 # remove the .h5ad ending
@@ -52,13 +77,15 @@ early_stopping_kwargs = {
     
 scpoli_model = scPoli(
 adata=adata,
-condition_keys="sample",
+condition_keys=sample_col,
 cell_type_keys="cell_type_level1", 
 embedding_dims=10,
 recon_loss='mse',
 )
 
-scpoli_loaded = scpoli_model.load(dir_path="models/reference_retraining1", adata=adata)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
+scpoli_loaded = scpoli_model.load(dir_path="models/reference_retraining1", adata=adata, map_location=device)
 
 
 ################## Loading in the mapping data ##################
@@ -74,7 +101,7 @@ adata_bashore = sc.read_h5ad(adata_input_file)
 #adata_bashore.X = adata_bashore.X.toarray()
 adata_bashore_full = adata_bashore.copy()
 
-adata_bashore.obs["sample"] = [sample + "_query" for sample in adata_bashore.obs["sample"]]
+adata_bashore.obs[sample_col] = [sample_col + "_query" for sample in adata_bashore.obs[sample_col]]
 
 #map gene ids to ensembl
 if ensembl_bool == False:
@@ -102,7 +129,8 @@ if ensembl_bool == False:
                             columns=adata_bashore.var_names)
 
     # Group by gene names and sum the counts
-    aggregated_data = adata_df.groupby(adata_df.columns, axis=1).sum()
+#    aggregated_data = adata_df.groupby(adata_df.columns, axis=1).sum()
+    aggregated_data = adata_df.T.groupby(level=0, sort=False).sum().T
 
     # Prepare the new 'var' DataFrame, keeping the first occurrence of each gene
     unique_var = adata_bashore.var.loc[~adata_bashore.var.index.duplicated(keep='first')]
@@ -244,10 +272,13 @@ adata_latent.obs['cell_type_uncert'] = results_dict['cell_type_level1']['uncert'
 #adata_latent.obs['classifier_outcome'] = (adata_latent.obs['cell_type_pred'] == adata_latent.obs['cell_type_level1'])
 
 #join adatas
-adata_latent_full = adata_latent_source.concatenate(
-    [adata_latent],
-    batch_key='query'
-)
+#adata_latent_full = adata_latent_source.concatenate(
+#    [adata_latent],
+#    batch_key='query'
+#)
+print(f"latent source: {adata_latent_source.obs.columns}")
+print(f"latent: {adata_latent.obs.columns}")
+adata_latent_full = ad.concat([adata_latent_source, adata_latent], label = 'query', )
 
 
 #adata_latent_full.write("healthy_mapping/Hu/Hu_test1.h5ad")
@@ -287,7 +318,7 @@ del bashore.obs["dataset"]
 del bashore.obs["cell_type_level2"]
 
 #remove the added suffix in barcodes to have the same input and output barcodes
-bashore.obs.index = [idx[:-2] for idx in bashore.obs.index]
+#bashore.obs.index = [idx[:-2] for idx in bashore.obs.index]
 
 # add cell type preds and uncertainties to original adata object
 
@@ -302,6 +333,8 @@ adata_bashore_full_obs = pd.DataFrame(index=adata_bashore_full.obs_names)
 merged_obs = adata_bashore_full_obs.merge(bashore_obs, left_index=True, right_index=True, how='left')
 
 # Fill NaN values with "unknown"
+for col in ['cell_type_level1', 'cell_type_uncert']:
+    merged_obs[col] = merged_obs[col].astype(str)
 merged_obs.fillna('unknown', inplace=True)
 
 # Assign the merged observations back to adata_bashore_full
@@ -314,8 +347,8 @@ print("Saving h5ad files...")
 sc.pp.neighbors(bashore, n_neighbors=15)
 sc.tl.umap(bashore)
 
-bashore.write("output/embedding_level1.h5ad")
-adata_bashore_full.write("output/full_level1.h5ad")
+bashore.write(output_dir / "embedding_level1.h5ad")
+adata_bashore_full.write(output_dir / "full_level1.h5ad")
 
 
 ############ PLOTTING ##############
@@ -338,7 +371,7 @@ color_palette_level1 = {
 
 
 # Plot UMAP with custom color palette
-sc.settings.figdir = "output/" # if you want to change the output path for figures
+sc.settings.figdir = output_dir_images # if you want to change the output path for figures
 sc.pl.umap(
     bashore,
     color='cell_type_level1',
