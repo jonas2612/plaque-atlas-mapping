@@ -34,8 +34,8 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("input_file", help="file to adata")
 parser.add_argument("output_dir", help="directory for output")
-parser.add_argument("output_dir_images", default=None, help="directory for output")
-parser.add_argument("sample_col", default="sample", help="adata.obs column with sample identifier.")
+parser.add_argument("--output_dir_images", default=None, help="directory for output")
+parser.add_argument("--sample_col", default="sample", help="adata.obs column with sample identifier.")
 parser.add_argument("--lognorm_bool", default=False, action="store_true", help="adata counts are log-normalized")
 parser.add_argument("--cell_type_bool", default=False, action="store_true", help="adata has a 'cell_type_level2' (or 'cell_type_level1') column filled with 'unknown'")
 parser.add_argument("--ensembl_bool", default=False, action="store_true", help=" varnames are ensemblIDs")
@@ -43,6 +43,8 @@ args = parser.parse_args()
 adata_input_file = args.input_file
 output_dir = Path(args.output_dir)
 output_dir_images = output_dir if args.output_dir_images is None else Path(args.output_dir_images)
+output_dir.mkdir(exist_ok=True)
+output_dir_images.mkdir(exist_ok=True)
 sample_col = args.sample_col
 lognorm_bool = args.lognorm_bool
 cell_type_bool = args.cell_type_bool
@@ -61,8 +63,8 @@ ensembl_bool = args.ensembl_bool
 ################## Loading in the atlas and model ##################
 
 print("Load model and atlas....")
-
-adata = sc.read_h5ad("data/Big-Atlas-level12-log1p-hvg.h5ad")
+file_dir = Path(os.path.dirname(os.path.realpath(__file__)))
+adata = sc.read_h5ad(file_dir / "data" / "Big-Atlas-level12-log1p-hvg.h5ad")
 
 #load trained reference model
 early_stopping_kwargs = {
@@ -84,8 +86,7 @@ recon_loss='mse',
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(device)
-scpoli_loaded = scpoli_model.load(dir_path="models/reference_retraining1", adata=adata, map_location=device)
+scpoli_loaded = scpoli_model.load(dir_path=file_dir / "models/reference_retraining1", adata=adata, map_location=device)
 
 
 ################## Loading in the mapping data ##################
@@ -107,7 +108,7 @@ adata_bashore.obs[sample_col] = [sample_col + "_query" for sample in adata_basho
 if ensembl_bool == False:
 
     print("Mapping and aggregation of ensembl genes...")
-    ensembl_id_df = pd.read_csv("data/gene_names_to_ensembl_ALLFOUND_allfernandez_no6_withallslysz.csv")
+    ensembl_id_df = pd.read_csv(file_dir / "data/gene_names_to_ensembl_ALLFOUND_allfernandez_no6_withallslysz.csv")
     gene_to_ensembl = dict(zip(ensembl_id_df['gene_name'], ensembl_id_df['ensembl_id']))
     # Map the variable names in AnnData
     adata_bashore.var['original_gene_names'] = adata_bashore.var_names
@@ -213,7 +214,7 @@ if cell_type_bool == False:
 
 
 print("Select the varnames for the model....")
-varnames_path = "models/reference_retraining1/var_names.csv"
+varnames_path = file_dir / "models/reference_retraining1/var_names.csv"
 var_names = np.genfromtxt(varnames_path, delimiter=",", dtype=str)
 adata2 = _validate_var_names(adata_final, var_names)
 
@@ -276,9 +277,7 @@ adata_latent.obs['cell_type_uncert'] = results_dict['cell_type_level1']['uncert'
 #    [adata_latent],
 #    batch_key='query'
 #)
-print(f"latent source: {adata_latent_source.obs.columns}")
-print(f"latent: {adata_latent.obs.columns}")
-adata_latent_full = ad.concat([adata_latent_source, adata_latent], label = 'query', )
+adata_latent_full = ad.concat([adata_latent_source, adata_latent], label = 'query', join="outer")
 
 
 #adata_latent_full.write("healthy_mapping/Hu/Hu_test1.h5ad")
